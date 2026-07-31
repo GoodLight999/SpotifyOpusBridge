@@ -2,10 +2,8 @@
 
 Spotify Opus Bridge remuxes Ogg/WebM Opus audio into MP4 without re-encoding so it can be used as a local file in Spotify Desktop for Windows.
 
-> Current hotfix: 1.2.1 fixes a fatal UI initialization loop (`Maximum call stack size exceeded`).
-
-Japanese documentation: [README.ja.md](README.ja.md)
+> Current hotfix: 1.2.2 fixes Windows remux failures caused by the MP4 artwork injector keeping the destination file open during replacement. It also includes the 1.2.1 UI recursion fix.
 
 ## Status
 
-The repository is being initialized from the tested 1.2.1 hotfix source. Windows tray controls and a native WebView2 host are the next implementation targets.
+The tested 1.2.2 hotfix source is being prepared for import. Windows task-tray controls and replacement of Edge app mode with a native WebView2 host remain the next architectural changes.
