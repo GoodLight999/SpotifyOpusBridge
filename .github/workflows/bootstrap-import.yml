@@ -1,14 +1,16 @@
 name: Bootstrap v0.1.0-alpha.1
 
 on:
-  push:
+  pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
 
 jobs:
   import-build-release:
+    if: github.event.pull_request.head.ref == 'trigger/v0.1.0-alpha.1'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +27,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $originalMain = '9ead9bf94d495d0c0515e464a7ee99c345361004'
+          $baseMain = '${{ github.event.pull_request.base.sha }}'
           $expectedArchiveSHA256 = '6be013ccd16b7f67f4d515cb81f956f1a90452ce1540a5c77e4897cf34fb917a'
+          if ([string]::IsNullOrWhiteSpace($baseMain)) {
+            throw 'Missing pull request base SHA'
+          }
           $chunkFiles = @(Get-ChildItem -LiteralPath (Join-Path $PWD 'bootstrap/chunks') -Filter 'part-*.txt' | Sort-Object Name)
           if ($chunkFiles.Count -ne 11) {
             throw "Expected 11 bootstrap chunks, found $($chunkFiles.Count)"
@@ -49,7 +55,7 @@ jobs:
           $sourceCommit = ('Import v0.1.0-alpha.1 source' | git commit-tree $tree -p $originalMain).Trim()
           git reset --hard $sourceCommit
           "SOURCE_COMMIT=$sourceCommit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          git push --force-with-lease="refs/heads/main:$env:GITHUB_SHA" origin HEAD:main
+          git push --force-with-lease="refs/heads/main:$baseMain" origin HEAD:main
 
       - name: Validate source
         shell: pwsh
