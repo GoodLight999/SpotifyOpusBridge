@@ -1,0 +1,127 @@
+name: Bootstrap v0.1.0-alpha.1
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  import-build-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+
+      - name: Import audited source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $originalMain = '9ead9bf94d495d0c0515e464a7ee99c345361004'
+          $expectedArchiveSHA256 = '6be013ccd16b7f67f4d515cb81f956f1a90452ce1540a5c77e4897cf34fb917a'
+          $chunkFiles = @(Get-ChildItem -LiteralPath (Join-Path $PWD 'bootstrap/chunks') -Filter 'part-*.txt' | Sort-Object Name)
+          if ($chunkFiles.Count -ne 11) {
+            throw "Expected 11 bootstrap chunks, found $($chunkFiles.Count)"
+          }
+          $encoded = ($chunkFiles | ForEach-Object { (Get-Content -LiteralPath $_.FullName -Raw).Trim() }) -join ''
+          $archive = Join-Path $PWD 'SpotifyOpusBridge-v0.1.0-alpha.1-import.tar.xz'
+          [IO.File]::WriteAllBytes($archive, [Convert]::FromBase64String($encoded))
+          $actualArchiveSHA256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualArchiveSHA256 -ne $expectedArchiveSHA256) {
+            throw "Bootstrap archive SHA-256 mismatch: expected $expectedArchiveSHA256, got $actualArchiveSHA256"
+          }
+          python -c "import tarfile; tarfile.open(r'$archive', 'r:xz').extractall(r'$PWD')"
+          Remove-Item -LiteralPath $archive -Force
+          Remove-Item -LiteralPath (Join-Path $PWD 'bootstrap') -Recurse -Force
+          Remove-Item -LiteralPath (Join-Path $PWD '.github/workflows/bootstrap-import.yml') -Force
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          $tree = (git write-tree).Trim()
+          $sourceCommit = ('Import v0.1.0-alpha.1 source' | git commit-tree $tree -p $originalMain).Trim()
+          git reset --hard $sourceCommit
+          "SOURCE_COMMIT=$sourceCommit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          git push --force-with-lease="refs/heads/main:$env:GITHUB_SHA" origin HEAD:main
+
+      - name: Validate source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $unformatted = @(gofmt -l .)
+          if ($unformatted.Count -ne 0) {
+            throw "gofmt required: $($unformatted -join ', ')"
+          }
+          go test ./...
+          go vet ./...
+          go test -shuffle=on -count=3 ./...
+          node --check ui/app.js
+
+      - name: Build native Windows release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          go run github.com/akavel/rsrc@v0.10.2 `
+            -arch amd64 `
+            -ico assets/icon.ico `
+            -manifest assets/app.manifest `
+            -o rsrc_windows_amd64.syso
+          go test -c -o SpotifyOpusBridge-tests.exe .
+          go build -trimpath -ldflags '-s -w -H windowsgui' -o SpotifyOpusBridge.exe .
+          python scripts/verify-pe-resources.py SpotifyOpusBridge.exe
+          .\SpotifyOpusBridge.exe --prepare-webview
+
+      - name: Package artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '0.1.0-alpha.1'
+          $packageName = "SpotifyOpusBridge-v$version-win-x64"
+          $packageDir = Join-Path $PWD $packageName
+          New-Item $packageDir -ItemType Directory -Force | Out-Null
+          Copy-Item SpotifyOpusBridge.exe (Join-Path $packageDir 'SpotifyOpusBridge.exe')
+          Copy-Item README.md, README.ja.md, LICENSE, THIRD_PARTY_NOTICES.md, RELEASE_NOTES.md $packageDir
+
+          $binaryZip = Join-Path $PWD "$packageName.zip"
+          $standaloneExe = Join-Path $PWD "SpotifyOpusBridge-v$version.exe"
+          $sourceZip = Join-Path $PWD "SpotifyOpusBridge-v$version-source.zip"
+          $checksums = Join-Path $PWD "SpotifyOpusBridge-v$version-SHA256SUMS.txt"
+          Copy-Item SpotifyOpusBridge.exe $standaloneExe
+          Compress-Archive -Path $packageDir -DestinationPath $binaryZip -CompressionLevel Optimal
+          git archive --format=zip --prefix="SpotifyOpusBridge-v$version-source/" --output=$sourceZip $env:SOURCE_COMMIT
+
+          $artifactPaths = @($binaryZip, $standaloneExe, $sourceZip)
+          $lines = foreach ($path in $artifactPaths) {
+            $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($path))"
+          }
+          $lines | Set-Content -Path $checksums -Encoding ascii
+          Get-Content $checksums
+
+      - name: Create prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = 'v0.1.0-alpha.1'
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "$tag already exists"
+          }
+          gh release create $tag `
+            SpotifyOpusBridge-v0.1.0-alpha.1-win-x64.zip `
+            SpotifyOpusBridge-v0.1.0-alpha.1.exe `
+            SpotifyOpusBridge-v0.1.0-alpha.1-source.zip `
+            SpotifyOpusBridge-v0.1.0-alpha.1-SHA256SUMS.txt `
+            --target $env:SOURCE_COMMIT `
+            --title 'Spotify Opus Bridge v0.1.0-alpha.1' `
+            --notes-file RELEASE_NOTES.md `
+            --prerelease
