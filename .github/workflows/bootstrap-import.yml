@@ -1,40 +1,53 @@
 name: Publish v0.1.0-alpha.2
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
+  issues: read
+  pull-requests: read
 
 jobs:
   import-build-release:
-    if: github.event.pull_request.head.ref == 'trigger/v0.1.0-alpha.2'
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/publish-alpha2-fixed' &&
+      github.actor == github.repository_owner
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha }}
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
           cache: false
 
-      - name: Import SHA-256-pinned source
+      - name: Verify trigger PR and import SHA-256-pinned source
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $originalMain = '9ead9bf94d495d0c0515e464a7ee99c345361004'
-          $baseMain = '${{ github.event.pull_request.base.sha }}'
-          $expectedArchiveSHA256 = 'dc00f6ef8179bbd266434d56ef38013743702a4579ae30902ac977dd4d9531f1'
-          $encodedPath = Join-Path $PWD 'bootstrap/alpha2-fixed.b64'
-          if (-not (Test-Path -LiteralPath $encodedPath)) {
-            throw 'Missing pinned alpha.2 source payload'
+          $number = '${{ github.event.issue.number }}'
+          $headRef = (gh api "repos/$env:GITHUB_REPOSITORY/pulls/$number" --jq '.head.ref').Trim()
+          if ($headRef -ne 'trigger/v0.1.0-alpha.2') {
+            throw "Refusing publish from unexpected PR head: $headRef"
           }
-          $encoded = (Get-Content -LiteralPath $encodedPath -Raw) -replace '\s', ''
+          $originalMain = '9ead9bf94d495d0c0515e464a7ee99c345361004'
+          $baseMain = (git rev-parse origin/main).Trim()
+          $expectedArchiveSHA256 = 'dc00f6ef8179bbd266434d56ef38013743702a4579ae30902ac977dd4d9531f1'
+
+          $comments = (gh api "repos/$env:GITHUB_REPOSITORY/issues/$number/comments?per_page=100") | ConvertFrom-Json
+          $parts = @($comments | Where-Object { $_.body -match '^ALPHA2FIX-[0-9]{2}:' } | Sort-Object { $_.body.Substring(0, 12) })
+          if ($parts.Count -ne 4) {
+            throw "Expected exactly 4 ALPHA2FIX data comments, found $($parts.Count)"
+          }
+          $encoded = ($parts | ForEach-Object { $_.body.Substring(13) }) -join ''
+          $encoded = $encoded -replace '\s', ''
           $archive = Join-Path $PWD 'SpotifyOpusBridge-v0.1.0-alpha.2-import.tar.xz'
           [IO.File]::WriteAllBytes($archive, [Convert]::FromBase64String($encoded))
           $actualArchiveSHA256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
