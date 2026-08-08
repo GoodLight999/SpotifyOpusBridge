@@ -1,59 +1,45 @@
-name: Bootstrap v0.1.0-alpha.2
+name: Publish v0.1.0-alpha.2
 
 on:
-  issue_comment:
-    types: [created]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
-  issues: read
-  pull-requests: read
 
 jobs:
   import-build-release:
-    if: >-
-      github.event.issue.pull_request &&
-      github.event.comment.body == '/bootstrap-alpha2' &&
-      github.actor == github.repository_owner
+    if: github.event.pull_request.head.ref == 'trigger/v0.1.0-alpha.2'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
           cache: false
 
-      - name: Verify trigger PR and import audited source
+      - name: Import SHA-256-pinned source
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $number = '${{ github.event.issue.number }}'
-          $headRef = (gh api "repos/$env:GITHUB_REPOSITORY/pulls/$number" --jq '.head.ref').Trim()
-          if ($headRef -ne 'trigger/v0.1.0-alpha.2') {
-            throw "Refusing bootstrap from unexpected PR head: $headRef"
-          }
           $originalMain = '9ead9bf94d495d0c0515e464a7ee99c345361004'
-          $baseMain = (git rev-parse origin/main).Trim()
-          $expectedArchiveSHA256 = '00ce17ff7f95a29ebf11019a58eaae792a202336ae5b8153e4a364d841094611'
-
-          $commentsJson = gh api "repos/$env:GITHUB_REPOSITORY/issues/$number/comments?per_page=100"
-          $comments = $commentsJson | ConvertFrom-Json
-          $parts = @($comments | Where-Object { $_.body -match '^ALPHA2B-[0-9]{2}:' } | Sort-Object { $_.body.Substring(0, 10) })
-          if ($parts.Count -ne 4) {
-            throw "Expected exactly 4 ALPHA2B data comments, found $($parts.Count)"
+          $baseMain = '${{ github.event.pull_request.base.sha }}'
+          $expectedArchiveSHA256 = 'dc00f6ef8179bbd266434d56ef38013743702a4579ae30902ac977dd4d9531f1'
+          $encodedPath = Join-Path $PWD 'bootstrap/alpha2-fixed.b64'
+          if (-not (Test-Path -LiteralPath $encodedPath)) {
+            throw 'Missing pinned alpha.2 source payload'
           }
-          $encoded = ($parts | ForEach-Object { $_.body.Substring(11) }) -join ''
-          $encoded = $encoded -replace '\s', ''
+          $encoded = (Get-Content -LiteralPath $encodedPath -Raw) -replace '\s', ''
           $archive = Join-Path $PWD 'SpotifyOpusBridge-v0.1.0-alpha.2-import.tar.xz'
           [IO.File]::WriteAllBytes($archive, [Convert]::FromBase64String($encoded))
           $actualArchiveSHA256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actualArchiveSHA256 -ne $expectedArchiveSHA256) {
-            throw "Bootstrap archive SHA-256 mismatch: expected $expectedArchiveSHA256, got $actualArchiveSHA256"
+            throw "Source archive SHA-256 mismatch: expected $expectedArchiveSHA256, got $actualArchiveSHA256"
           }
           python -c "import tarfile; tarfile.open(r'$archive', 'r:xz').extractall(r'$PWD')"
           Remove-Item -LiteralPath $archive -Force
