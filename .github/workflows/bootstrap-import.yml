@@ -1,16 +1,20 @@
-name: Bootstrap v0.1.0-alpha.1
+name: Bootstrap v0.1.0-alpha.2
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
+  issues: read
+  pull-requests: read
 
 jobs:
   import-build-release:
-    if: github.event.pull_request.head.ref == 'trigger/v0.1.0-alpha.1'
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/bootstrap-alpha2' &&
+      github.actor == github.repository_owner
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,22 +26,30 @@ jobs:
           go-version: '1.23.x'
           cache: false
 
-      - name: Import audited source
+      - name: Verify trigger PR and import audited source
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $number = '${{ github.event.issue.number }}'
+          $headRef = (gh api "repos/$env:GITHUB_REPOSITORY/pulls/$number" --jq '.head.ref').Trim()
+          if ($headRef -ne 'trigger/v0.1.0-alpha.2') {
+            throw "Refusing bootstrap from unexpected PR head: $headRef"
+          }
           $originalMain = '9ead9bf94d495d0c0515e464a7ee99c345361004'
-          $baseMain = '${{ github.event.pull_request.base.sha }}'
-          $expectedArchiveSHA256 = '6be013ccd16b7f67f4d515cb81f956f1a90452ce1540a5c77e4897cf34fb917a'
-          if ([string]::IsNullOrWhiteSpace($baseMain)) {
-            throw 'Missing pull request base SHA'
+          $baseMain = (git rev-parse origin/main).Trim()
+          $expectedArchiveSHA256 = '00ce17ff7f95a29ebf11019a58eaae792a202336ae5b8153e4a364d841094611'
+
+          $commentsJson = gh api "repos/$env:GITHUB_REPOSITORY/issues/$number/comments?per_page=100"
+          $comments = $commentsJson | ConvertFrom-Json
+          $parts = @($comments | Where-Object { $_.body -match '^ALPHA2-[0-9]{2}:' } | Sort-Object { $_.body.Substring(0, 9) })
+          if ($parts.Count -ne 9) {
+            throw "Expected exactly 9 ALPHA2 data comments, found $($parts.Count)"
           }
-          $chunkFiles = @(Get-ChildItem -LiteralPath (Join-Path $PWD 'bootstrap/chunks') -Filter 'part-*.txt' | Sort-Object Name)
-          if ($chunkFiles.Count -ne 11) {
-            throw "Expected 11 bootstrap chunks, found $($chunkFiles.Count)"
-          }
-          $encoded = ($chunkFiles | ForEach-Object { (Get-Content -LiteralPath $_.FullName -Raw).Trim() }) -join ''
-          $archive = Join-Path $PWD 'SpotifyOpusBridge-v0.1.0-alpha.1-import.tar.xz'
+          $encoded = ($parts | ForEach-Object { $_.body.Substring(10) }) -join ''
+          $encoded = $encoded -replace '\s', ''
+          $archive = Join-Path $PWD 'SpotifyOpusBridge-v0.1.0-alpha.2-import.tar.xz'
           [IO.File]::WriteAllBytes($archive, [Convert]::FromBase64String($encoded))
           $actualArchiveSHA256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actualArchiveSHA256 -ne $expectedArchiveSHA256) {
@@ -52,19 +64,21 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
           $tree = (git write-tree).Trim()
-          $sourceCommit = ('Import v0.1.0-alpha.1 source' | git commit-tree $tree -p $originalMain).Trim()
+          $sourceCommit = ('Import v0.1.0-alpha.2 source' | git commit-tree $tree -p $originalMain).Trim()
           git reset --hard $sourceCommit
           "SOURCE_COMMIT=$sourceCommit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           git push --force-with-lease="refs/heads/main:$baseMain" origin HEAD:main
+
+      - name: Install FFmpeg
+        shell: pwsh
+        run: choco install ffmpeg -y --no-progress
 
       - name: Validate source
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $unformatted = @(gofmt -l .)
-          if ($unformatted.Count -ne 0) {
-            throw "gofmt required: $($unformatted -join ', ')"
-          }
+          if ($unformatted.Count -ne 0) { throw "gofmt required: $($unformatted -join ', ')" }
           go test ./...
           go vet ./...
           go test -shuffle=on -count=3 ./...
@@ -83,18 +97,18 @@ jobs:
           go build -trimpath -ldflags '-s -w -H windowsgui' -o SpotifyOpusBridge.exe .
           python scripts/verify-pe-resources.py SpotifyOpusBridge.exe
           .\SpotifyOpusBridge.exe --prepare-webview
+          if ($LASTEXITCODE -ne 0) { throw "WebView2 host preparation failed with exit code $LASTEXITCODE" }
 
       - name: Package artifacts
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = '0.1.0-alpha.1'
+          $version = '0.1.0-alpha.2'
           $packageName = "SpotifyOpusBridge-v$version-win-x64"
           $packageDir = Join-Path $PWD $packageName
           New-Item $packageDir -ItemType Directory -Force | Out-Null
           Copy-Item SpotifyOpusBridge.exe (Join-Path $packageDir 'SpotifyOpusBridge.exe')
           Copy-Item README.md, README.ja.md, LICENSE, THIRD_PARTY_NOTICES.md, RELEASE_NOTES.md $packageDir
-
           $binaryZip = Join-Path $PWD "$packageName.zip"
           $standaloneExe = Join-Path $PWD "SpotifyOpusBridge-v$version.exe"
           $sourceZip = Join-Path $PWD "SpotifyOpusBridge-v$version-source.zip"
@@ -102,7 +116,6 @@ jobs:
           Copy-Item SpotifyOpusBridge.exe $standaloneExe
           Compress-Archive -Path $packageDir -DestinationPath $binaryZip -CompressionLevel Optimal
           git archive --format=zip --prefix="SpotifyOpusBridge-v$version-source/" --output=$sourceZip $env:SOURCE_COMMIT
-
           $artifactPaths = @($binaryZip, $standaloneExe, $sourceZip)
           $lines = foreach ($path in $artifactPaths) {
             $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -117,17 +130,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $tag = 'v0.1.0-alpha.1'
+          $tag = 'v0.1.0-alpha.2'
           gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            throw "$tag already exists"
-          }
+          if ($LASTEXITCODE -eq 0) { throw "$tag already exists" }
           gh release create $tag `
-            SpotifyOpusBridge-v0.1.0-alpha.1-win-x64.zip `
-            SpotifyOpusBridge-v0.1.0-alpha.1.exe `
-            SpotifyOpusBridge-v0.1.0-alpha.1-source.zip `
-            SpotifyOpusBridge-v0.1.0-alpha.1-SHA256SUMS.txt `
+            SpotifyOpusBridge-v0.1.0-alpha.2-win-x64.zip `
+            SpotifyOpusBridge-v0.1.0-alpha.2.exe `
+            SpotifyOpusBridge-v0.1.0-alpha.2-source.zip `
+            SpotifyOpusBridge-v0.1.0-alpha.2-SHA256SUMS.txt `
             --target $env:SOURCE_COMMIT `
-            --title 'Spotify Opus Bridge v0.1.0-alpha.1' `
+            --title 'Spotify Opus Bridge v0.1.0-alpha.2' `
             --notes-file RELEASE_NOTES.md `
             --prerelease
